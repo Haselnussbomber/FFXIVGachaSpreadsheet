@@ -1,5 +1,7 @@
 ﻿using System.IO.Compression;
 using Newtonsoft.Json;
+using Utf8JsonWriter = System.Text.Json.Utf8JsonWriter;
+using JsonWriterOptions = System.Text.Json.JsonWriterOptions;
 
 namespace SupabaseExporter;
 
@@ -21,7 +23,18 @@ public static class ExportHandler
     {
         WriteDataJson("LastUpdate.json", DateTime.UtcNow.ToString("R"));
     }
-    
+
+    public static async Task WriteDataJson(string filename, Func<Utf8JsonWriter, Task> writeFunc, bool withIndent = false)
+    {
+        var file = new FileInfo(Path.Combine(WebsitePath, AssetsPath, filename));
+        if (file.DirectoryName != null && !Directory.Exists(file.DirectoryName))
+            Directory.CreateDirectory(file.DirectoryName);
+
+        using var fileStream = File.Create(file.FullName);
+        using var jsonWriter = new Utf8JsonWriter(fileStream, new JsonWriterOptions() { Indented = withIndent });
+        await writeFunc(jsonWriter);
+    }
+
     public static void WriteDataJson<T>(string filename, T data, bool withIndent = false)
     {
         var file = new FileInfo(Path.Combine(WebsitePath, AssetsPath, filename));

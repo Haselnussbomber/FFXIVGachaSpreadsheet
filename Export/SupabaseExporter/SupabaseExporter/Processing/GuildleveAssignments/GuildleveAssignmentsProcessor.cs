@@ -1,76 +1,122 @@
 ﻿using Lumina.Extensions;
 using Microsoft.EntityFrameworkCore;
-using SupabaseExporter.Structures.Exports;
 
 namespace SupabaseExporter.Processing.GuildleveAssignments;
 
 public class GuildleveAssignmentsProcessor : IDisposable
 {
-    private readonly Dictionary<uint, LeveIssuer> ProcessedData = new();
     private readonly Dictionary<uint, (uint ENpcBaseId, uint LevelId)> ENpcCache = [];
-
-    public async Task ProcessAllData(DatabaseContext context)
-    {
-        Logger.Information("Processing leve data");
-        await Process(context);
-        Export();
-    }
 
     public void Dispose()
     {
-        ProcessedData.Clear();
         ENpcCache.Clear();
         GC.Collect();
     }
 
-    private async Task Process(DatabaseContext context)
+    public async Task ProcessAllData(DatabaseContext context)
     {
-        LeveIssuer? currentIssuer = null;
+        Logger.Information("Processing leve data");
 
-        var stream = context.GuildleveAssignments
-            .OrderBy(m => m.RowId)
-            .ThenBy(m => m.CategoryRowId)
-            .ThenBy(m => m.CategoryIndex)
-            .AsNoTracking()
-            .AsAsyncEnumerable();
-
-        await foreach (var row in stream)
+        await ExportHandler.WriteDataJson("LeveIssuers.json", async writer =>
         {
-            if (currentIssuer == null || currentIssuer.GuildleveAssignmentId != row.RowId)
-            {
-                currentIssuer = new LeveIssuer { GuildleveAssignmentId = row.RowId };
+            uint? currentIssuerId = null;
+            byte? currentCategoryId = null;
+            byte? currentTypeIndex = null;
 
-                if (TryFindENpcByDataId(row.RowId, out var enpcBaseId, out var levelId))
+            writer.WriteStartObject();
+
+            var stream = context.GuildleveAssignments
+                .OrderBy(m => m.RowId)
+                .ThenBy(m => m.CategoryRowId)
+                .ThenBy(m => m.CategoryIndex)
+                .AsNoTracking()
+                .AsAsyncEnumerable();
+
+            void WriteEnd(int depth)
+            {
+                if (currentTypeIndex != null)
                 {
-                    currentIssuer.ENpcBaseId = enpcBaseId;
-                    currentIssuer.LevelId = levelId;
+                    writer.WriteEndArray();
+                    writer.WriteEndObject();
+                }
+                if (depth > 1 && currentCategoryId != null)
+                {
+                    writer.WriteEndObject();
+                    writer.WriteEndObject();
+                }
+                if (depth > 2 && currentIssuerId != null)
+                {
+                    writer.WriteEndObject();
+                    writer.WriteEndObject();
+                }
+            }
+
+            await foreach (var row in stream)
+            {
+                if (currentIssuerId != row.RowId)
+                {
+                    WriteEnd(3);
+
+                    currentIssuerId = row.RowId;
+                    currentCategoryId = null;
+                    currentTypeIndex = null;
+
+                    writer.WritePropertyName(row.RowId.ToString());
+                    writer.WriteStartObject();
+
+                    writer.WriteNumber("GuildleveAssignmentId"u8, row.RowId);
+
+                    if (TryFindENpcByDataId(row.RowId, out var enpcBaseId, out var levelId))
+                    {
+                        writer.WriteNumber("ENpcBaseId"u8, enpcBaseId);
+                        writer.WriteNumber("LevelId"u8, levelId);
+                    }
+
+                    writer.WriteStartObject("Categories"u8);
                 }
 
-                ProcessedData.Add(currentIssuer.GuildleveAssignmentId, currentIssuer);
+                if (currentCategoryId != row.CategoryRowId)
+                {
+                    WriteEnd(2);
+
+                    currentCategoryId = row.CategoryRowId;
+                    currentTypeIndex = null;
+
+                    writer.WritePropertyName(row.CategoryRowId.ToString());
+                    writer.WriteStartObject();
+
+                    writer.WriteNumber("CategoryId"u8, row.CategoryRowId);
+
+                    writer.WriteStartObject("Types"u8);
+                }
+
+                if (currentTypeIndex != row.CategoryIndex)
+                {
+                    WriteEnd(1);
+
+                    currentTypeIndex = row.CategoryIndex;
+
+                    writer.WritePropertyName(row.CategoryIndex.ToString());
+                    writer.WriteStartObject();
+
+                    writer.WriteNumber("CategoryIndex"u8, row.CategoryIndex);
+
+                    writer.WriteStartArray("LeveIds"u8);
+                }
+
+                foreach (var leveId in row.LeveIds)
+                {
+                    writer.WriteNumberValue(leveId);
+                }
             }
 
-            if (!currentIssuer.Categories.TryGetValue(row.CategoryRowId, out var categoryEntry))
-            {
-                categoryEntry = new LeveAssignmentCategory { CategoryId = row.CategoryRowId };
-                currentIssuer.Categories.Add(row.CategoryRowId, categoryEntry);
-            }
+            WriteEnd(3);
 
-            if (!categoryEntry.Types.TryGetValue(row.CategoryIndex, out var typeEntry))
-            {
-                typeEntry = new LeveAssignmentCategoryType { CategoryIndex = row.CategoryIndex };
-                categoryEntry.Types.Add(row.CategoryIndex, typeEntry);
-            }
+            writer.WriteEndObject();
 
-            foreach (var leveId in row.LeveIds)
-            {
-                typeEntry.LeveIds.Add(leveId);
-            }
-        }
-    }
+            await writer.FlushAsync();
+        });
 
-    private void Export()
-    {
-        ExportHandler.WriteDataJson("LeveIssuers.json", ProcessedData);
         Logger.Information("Done exporting data ...");
     }
 
